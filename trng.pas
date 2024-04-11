@@ -34,6 +34,12 @@ function TRNG_long(var ser: TRNGinstance): Integer;
 {Returns random unsigned 32-bit integer}
 function TRNG_dword(var ser: TRNGinstance):LongWord;
 
+{Returns random unsigned 32-bit integer}
+Function TRNG_FDR(Var ser: TRNGinstance; const n:longword):longword; //FastDiceRoller
+
+{Returns random unsigned 32-bit integer}
+Function TRNG_KY(Var ser: TRNGinstance; const n:longword):Longword; // Knuth-Yao
+
 {Returns random signed 64-bit integer}  
 function TRNG_Int64(var ser: TRNGinstance):Int64;
 
@@ -52,8 +58,11 @@ function TRNG_double(var ser: TRNGinstance): double;
 {Returns random double float number with 53-bit precision}
 function TRNG_double53(var ser: TRNGinstance): double;
 
-{Returns random extended float number with 64-bit precision}
+{Returns random extended float number in range [-1,1] with 64-bit precision}
 function TRNG_extended(var ser: TRNGinstance):extended;
+
+{Returns random extended float number in range [0,1] with 64-bit precision}
+function TRNG_extended_positive(var ser: TRNGinstance):extended;
 
 {Returns random unsigned 16-bit integer in given range}      
 Function TRNG_Random(var ser: TRNGinstance; const range:word):word;
@@ -73,12 +82,14 @@ implementation
 
 uses
 SysUtils,
-ZLib,
-Windows;
+Math,
+ZLib;
 
 Var
-NormalMode : Boolean;
-FormatSettings:TFormatSettings;
+MaxInt64 : Extended;
+FlipWord:int64 = 0;
+FlipPos:Integer = 0;
+
 {---------------------------------------------------------------------------}
 function Min(a, b: Int64): Int64;
 begin
@@ -116,7 +127,7 @@ ser.DCB.ByteSize := 8; // 8
 ser.DCB.Parity := 0;  // N
 ser.DCB.StopBits := 1; // 1
 ser.Connect(Trim(Portname));
-NormalMode := True;
+ser.Purge; // "Official" method to purge serial interface buffers
 SetLength(S,128);
 ser.RecvBuffer(@S[1],Length(S)); // Required to empty USB buffer. Experiments shown that some output bytes are retained in driver memory.
 FillChar(S[1],Length(S),0);
@@ -143,11 +154,11 @@ End;
 Procedure TRNG_Close(var ser:TRNGinstance);
 Var S:String;
 begin
-ser.Purge; // "Official" method to purge serial interface buffers
 SetLength(S,128);
 ser.RecvBuffer(@S[1],Length(S)); // Required to empty USB buffer. Experiments shown that even 128 bytes are retained in driver memory.
 FillChar(S[1],Length(S),0);
 SetLength(S,0);
+ser.Purge; // "Official" method to purge serial interface buffers
 ser.Destroy;
 end;
 {---------------------------------------------------------------------------}
@@ -177,117 +188,82 @@ SetLength(S,128);
 ser.RecvBuffer(@S[1],Length(S)); // Required to empty USB buffer. Experiments shown that some output bytes are retained in driver memory.
 FillChar(S[1],Length(S),0);
 SetLength(S,0);
-NormalMode := (Mode in [Normal,RNG1normal,RNG2normal]);
 End;
 {---------------------------------------------------------------------------}
 function TRNG_long(var ser: TRNGinstance): Integer;
-Var R:LongWord;
 begin
-  TRNG_long := 0;
-  If NormalMode Then begin
-  ser.RecvBuffer(@R,4);
-  TRNG_long := R shr 1;
-  end;
+  ser.RecvBuffer(@Result,4);
 end;
 {---------------------------------------------------------------------------}
 function TRNG_dword(var ser: TRNGinstance):LongWord;
-Var R:LongWord;  
 begin
-  TRNG_dword := 0;
-  If NormalMode Then begin
-  ser.RecvBuffer(@R,4);
-  TRNG_dword := R;
-  end;
+  ser.RecvBuffer(@Result,4);
 end;
 {---------------------------------------------------------------------------}
 function TRNG_word(var ser: TRNGinstance): word;
-type
-  TwoWords = packed record
-               L,H: word
-             end;
 begin
-  TRNG_word := 0;
-  If NormalMode Then TRNG_word := TwoWords(TRNG_dword(ser)).H;
+   ser.RecvBuffer(@Result,2);
 end;
 {---------------------------------------------------------------------------}
 function TRNG_double(var ser: TRNGinstance): double;
   {random double [0..1) with 32 bit precision}
 begin
-   TRNG_Double := 0.0;
-   If NormalMode Then TRNG_double := (TRNG_dword(ser) + 2147483648.0) / 4294967296.0;
+   Result := (TRNG_dword(ser) + 2147483648.0) / 4294967296.0;
 end;
 {---------------------------------------------------------------------------}
 function TRNG_double53(var ser: TRNGinstance): double;
   {random double in [0..1) with full double 53 bit precision}
-var
-  hb,lb: LongWord;
+var hb,lb: LongWord;
 begin
-  TRNG_Double53 := 0.0;
-  If NormalMode Then begin
   hb := TRNG_dword(ser) shr 5;
   lb := TRNG_dword(ser) shr 6;
-  TRNG_double53 := (hb*67108864.0+lb)/9007199254740992.0;
-  end;
+  Result := (hb*67108864.0+lb)/9007199254740992.0;
 end;
 {---------------------------------------------------------------------------}
 function TRNG_extended(var ser: TRNGinstance):extended;
-var s:string;
-i:integer;
 Begin
-TRNG_extended := 0.0;
-If NormalMode Then begin
-s := '0'+FormatSettings.DecimalSeparator;
-for i := 1 to 6 do s := s+LZ(TRNG_Random(ser,1000),3);
-TRNG_extended := StrToFloat(S);
-end;
+// Divide the random numerator by MaxInt64 to get a random Extended number in [-1, 1)
+Result := TRNG_Int64(ser) / MaxInt64;
+End;
+{---------------------------------------------------------------------------}
+function TRNG_extended_positive(var ser: TRNGinstance):extended;
+Begin
+// Divide the random numerator by MaxInt64 to get a random Extended number in [0, 1)
+Result := (TRNG_Int64(ser) / MaxInt64 + 1) * 0.5;
 End;
 {---------------------------------------------------------------------------}
 Function TRNG_Random(var ser: TRNGinstance; const range:word):word;
 var seed:longword;
 begin
 seed:=TRNG_dword(ser);
-TRNG_Random := 0;
-If NormalMode Then begin
-TRNG_Random:=((seed shr 16)*Range+((seed and $ffff)*Range shr 16)) shr 16;
-end;
+Result:=((seed shr 16)*Range+((seed and $ffff)*Range shr 16)) shr 16;
 end;
 {---------------------------------------------------------------------------}
 Function TRNG_Random64(var ser: TRNGinstance; const range:longword):longword;
 var seed:int64;
 begin
-TRNG_Random64:= 0;
 seed := TRNG_Int64(ser);
-If NormalMode Then begin
-TRNG_Random64:=((seed shr 32)*Range+((seed and $ffffffff)*Range shr 32)) shr 32;
-end;
+Result:=((seed shr 32)*Range+((seed and $ffffffff)*Range shr 32)) shr 32;
 end;
 {---------------------------------------------------------------------------}
 Function TRNG_Int64(var ser: TRNGinstance):Int64;
-var seed:int64;
 begin
-TRNG_Int64 := 0;
-If NormalMode Then begin
-ser.RecvBuffer(@seed,8);
-TRNG_Int64:=seed;
-end;
+ser.RecvBuffer(@Result,8);
 end;
 {---------------------------------------------------------------------------}
 Function TRNG_Random64range(var ser: TRNGinstance; const amin,amax:int64):int64;
 Begin
-TRNG_Random64range  := 0;
-If NormalMode Then begin
-TRNG_Random64range:=TRNG_ValRangeNoMod64(ser,Abs(amin-amax)+1)+Min(amax,amin);
-end;
+Result:=TRNG_ValRangeNoMod64(ser,Abs(amin-amax)+1)+Min(amax,amin);
 end;
 {---------------------------------------------------------------------------}
 Function Seed_Random64(const seed:int64; const range:longword):longword;
 begin
-Seed_Random64:=((seed shr 32)*Range+((seed and $ffffffff)*Range shr 32)) shr 32;
+Result:=((seed shr 32)*Range+((seed and $ffffffff)*Range shr 32)) shr 32;
 end;
 {---------------------------------------------------------------------------}
 Function Seed_Random(const seed:LongWord; const range:word):word;
 begin
-Seed_Random:=((seed shr 16)*Range+((seed and $ffff)*Range shr 16)) shr 16;
+Result:=((seed shr 16)*Range+((seed and $ffff)*Range shr 16)) shr 16;
 end;
 {---------------------------------------------------------------------------}
 Function TRNG_ValRangeNoMod(Var ser: TRNGinstance; Const InRange: Cardinal):Cardinal;
@@ -302,8 +278,6 @@ var
   Range,filter, n : Cardinal;
 
 begin
-  TRNG_ValRangeNoMod := 0;
-  If NormalMode Then begin
   i:=0;
   Range := inRange;
   if range<1 then range:=1;
@@ -313,8 +287,7 @@ begin
   repeat
     n:=TRNG_dword(ser) and filter;
   until n<range;
-  TRNG_ValRangeNoMod:=n;
-  end;
+  Result:=n;
 end;
 {---------------------------------------------------------------------------}
 Function TRNG_ValRangeNoMod64(Var ser: TRNGinstance; Const InRange: Int64):Int64;
@@ -331,8 +304,6 @@ var
   Range,filter, n : Int64;
 
 begin
-  TRNG_ValRangeNoMod64 := 0;
-  If NormalMode Then begin
   i:=0;
   Range := Abs(inRange);
   while range > (p[i]) do i:=i+1;
@@ -341,14 +312,64 @@ begin
   repeat
     n:=Abs(TRNG_Int64(ser)) and filter;
   until n<range;
-  TRNG_ValRangeNoMod64:=n;
-  end;
+  Result:=n;
 end;
 {---------------------------------------------------------------------------}
 Procedure TRNG_FillRandom(var ser: TRNGinstance; Something:Pointer; Const Size:Integer);
 Begin
 ser.RecvBuffer(something,size);
 End;
+{---------------------------------------------------------------------------}
+function NextBit(Var ser: TRNGinstance; Var flip_word:Int64; Var flip_pos:Integer):Integer;
+begin
+if(flip_pos=0) then begin
+flip_word := TRNG_Int64(ser);
+flip_pos := 64;
+end;
+Dec(flip_pos);
+Result := (flip_word and (Int64(1) shl flip_pos)) shr flip_pos;
+end;
+{---------------------------------------------------------------------------}
+{ Lumbroso J. (2013)
+Optimal discrete uniform generation from coin flips, and applications.
+arXiv:1304.1916 }
+Function TRNG_FDR(Var ser: TRNGinstance; const n:longword):longword; //FastDiceRoller
+var
+v : longword;
+c : longword;
+begin
+v := 1;
+c := 0;
+while(true) do begin
+v := (v shl 1);
+c := (c shl 1) + NextBit(ser,flipword,flippos);
+if (v >= n) then begin
+if(c < n) then begin result := c; Exit; end
+else
+begin
+v := v - n;
+c := c - n;
+end;
+end;
+end;
+end;
+{---------------------------------------------------------------------------}
+Function TRNG_KY(Var ser: TRNGinstance; const n:longword):Longword; // Knuth-Yao
+Var v,c,d:longword;
+begin
+v := 1; c := 0;
+while(true) do begin
+while (v<n) do begin
+v := (v shl 1);
+c := (c shl 1)+NextBit(ser,flipword,flippos);
+end;
+d := v-n;
+if (c >= d) then begin
+Result := c - d; Exit;
+end
+else v := d;
+end;
+end;
 {---------------------------------------------------------------------------}
 function CompressStr(const S : String) : String;
 var
@@ -406,6 +427,5 @@ End;
 {---------------------------------------------------------------------------}
 
 begin
-NormalMode := False;
-GetLocaleFormatSettings(LOCALE_SYSTEM_DEFAULT,FormatSettings);
+MaxInt64 := Power(2, 63);
 end.
